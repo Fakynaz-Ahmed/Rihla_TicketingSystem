@@ -1,0 +1,13 @@
+{
+  "profiles": {
+    "Rihla": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "launchUrl": "swagger",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:55045;http://localhost:55046"
+    }
+  }
+}
