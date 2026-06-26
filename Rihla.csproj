@@ -9,6 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
     <PackageReference Include="FirebaseAdmin" Version="3.5.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.2" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="9.0.4" />
@@ -20,25 +21,18 @@
 
   <ItemGroup>
     <Compile Remove="Controllers/OdooApiController.cs" />
-    <Compile Remove="Controllers/TicketsController.cs" />
-    <Compile Remove="Controllers/VisitsController.cs" />
     <Compile Remove="Controllers/NotificationsController.cs" />
     <Compile Remove="Filters/ApiKeyAuthFilter.cs" />
     <Compile Remove="Filters/ApiKeyOperationFilter.cs" />
     <Compile Remove="Services/Odoo/**/*.cs" />
     <Compile Remove="Services/Machines/**/*.cs" />
     <Compile Remove="Services/Reports/**/*.cs" />
-    <Compile Remove="Services/Visits/**/*.cs" />
     <Compile Remove="Services/Dashboard/**/*.cs" />
-    <Compile Remove="Services/Tickets/**/*.cs" />
     <Compile Remove="Services/Webhook/**/*.cs" />
     <Compile Remove="Services/Notifications/**/*.cs" />
     <Compile Remove="Models/Db/DbMachine.cs" />
     <Compile Remove="Models/Db/DbConversationMessage.cs" />
     <Compile Remove="Models/Db/DbMachineCategory.cs" />
-    <Compile Remove="Models/Db/DbTicket.cs" />
-    <Compile Remove="Models/Db/DbVisit.cs" />
-    <Compile Remove="Models/Db/DbVisitActivity.cs" />
     <Compile Remove="Models/Db/DbUserMachine.cs" />
     <Compile Remove="Models/Db/DbNotification.cs" />
     <Compile Remove="Services/Db/IMachineRepository.cs" />
@@ -47,18 +41,11 @@
     <Compile Remove="Services/Db/MachineCategoryRepository.cs" />
     <Compile Remove="Services/Db/IUserMachineRepository.cs" />
     <Compile Remove="Services/Db/UserMachineRepository.cs" />
-    <Compile Remove="Services/Db/ITicketRepository.cs" />
-    <Compile Remove="Services/Db/TicketRepository.cs" />
-    <Compile Remove="Services/Db/IVisitRepository.cs" />
-    <Compile Remove="Services/Db/VisitRepository.cs" />
-    <Compile Remove="Services/Db/IVisitActivityRepository.cs" />
-    <Compile Remove="Services/Db/VisitActivityRepository.cs" />
     <Compile Remove="Services/Db/INotificationRepository.cs" />
     <Compile Remove="Services/Db/NotificationRepository.cs" />
     <Compile Remove="Services/Db/IReportRepository.cs" />
     <Compile Remove="Services/Db/ReportRepository.cs" />
     <Compile Remove="DTOs/MachineDtos.cs" />
-    <Compile Remove="DTOs/VisitDtos.cs" />
     <Compile Remove="DTOs/ReportDtos.cs" />
     <Compile Remove="DTOs/DashboardDtos.cs" />
     <Compile Remove="Models/OdooModels.cs" />

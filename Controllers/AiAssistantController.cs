@@ -251,6 +251,185 @@ public class AiAssistantController : ControllerBase
         }
     }
 
+    /// <summary>Escalate conversation to human support (Technical Support).</summary>
+    [HttpPost("escalate")]
+    public async Task<IActionResult> Escalate([FromBody] EscalateRequestDto request)
+    {
+        if (request == null || string.IsNullOrEmpty(request.ConversationId))
+        {
+            return BadRequest(new ApiErrorResponse { Message = "معرف المحادثة مطلوب." });
+        }
+
+        try
+        {
+            var userId = GetUserId();
+            await _convService.EscalateAsync(request.ConversationId, userId, request.Reason);
+            return Ok(ApiResponse<object?>.Ok(null, "تم تصعيد المحادثة إلى الدعم بنجاح."));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error escalating conversation {ConvId}", request.ConversationId);
+            return StatusCode(500, new ApiErrorResponse { Message = "فشل تصعيد المحادثة." });
+        }
+    }
+
+    /// <summary>Reopen conversation to AI assistant.</summary>
+    [HttpPost("reopen")]
+    public async Task<IActionResult> Reopen([FromBody] ReopenConversationRequestDto request)
+    {
+        if (request == null || string.IsNullOrEmpty(request.ConversationId))
+        {
+            return BadRequest(new ApiErrorResponse { Message = "معرف المحادثة مطلوب." });
+        }
+
+        try
+        {
+            var userId = GetUserId();
+            await _convService.ReopenAsync(request.ConversationId, userId);
+            return Ok(ApiResponse<object?>.Ok(null, "تم إعادة فتح المحادثة بنجاح."));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error reopening conversation {ConvId}", request.ConversationId);
+            return StatusCode(500, new ApiErrorResponse { Message = "فشل إعادة فتح المحادثة." });
+        }
+    }
+
+    /// <summary>Send message as a support agent.</summary>
+    [HttpPost("support/chat")]
+    public async Task<IActionResult> SupportChat([FromForm] string conversationId, [FromForm] string? message, IFormFile? file)
+    {
+        if (string.IsNullOrEmpty(conversationId))
+        {
+            return BadRequest(new ApiErrorResponse { Message = "معرف المحادثة مطلوب." });
+        }
+
+        try
+        {
+            var userId = GetUserId();
+            var result = await _convService.SupportSendMessageAsync(conversationId, userId, message, file);
+            return Ok(ApiResponse<SendMessageResponseDto>.Ok(result));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in support chat for conversation {ConvId}", conversationId);
+            return StatusCode(500, new ApiErrorResponse { Message = "فشل إرسال رسالة الدعم." });
+        }
+    }
+
+    /// <summary>End the conversation by a support agent.</summary>
+    [HttpPost("support/conversation/end")]
+    public async Task<IActionResult> SupportEndConversation([FromBody] EndConversationRequestDto request)
+    {
+        if (request == null || string.IsNullOrEmpty(request.ConversationId))
+        {
+            return BadRequest(new ApiErrorResponse { Message = "معرف المحادثة مطلوب." });
+        }
+
+        try
+        {
+            await _convService.EndBySupportAsync(request.ConversationId);
+            return Ok(ApiResponse<object?>.Ok(null, "تم إنهاء المحادثة من قبل الدعم بنجاح."));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in support ending conversation {ConvId}", request.ConversationId);
+            return StatusCode(500, new ApiErrorResponse { Message = "فشل إنهاء المحادثة." });
+        }
+    }
+
+    /// <summary>Request a specialist to join the conversation.</summary>
+    [HttpPost("support/request-specialist")]
+    public async Task<IActionResult> RequestSpecialist([FromBody] RequestSpecialistRequestDto request)
+    {
+        if (request == null || string.IsNullOrEmpty(request.ConversationId))
+        {
+            return BadRequest(new ApiErrorResponse { Message = "معرف المحادثة مطلوب." });
+        }
+
+        try
+        {
+            var userId = GetUserId();
+            await _convService.RequestSpecialistAsync(request.ConversationId, userId, request.Description);
+            return Ok(ApiResponse<object?>.Ok(null, "تم طلب إرسال متخصص للمحادثة بنجاح."));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error requesting specialist for conversation {ConvId}", request.ConversationId);
+            return StatusCode(500, new ApiErrorResponse { Message = "فشل طلب متخصص للمحادثة." });
+        }
+    }
+
+    /// <summary>Send message as a specialist.</summary>
+    [HttpPost("specialist/chat")]
+    public async Task<IActionResult> SpecialistChat([FromForm] string conversationId, [FromForm] string? message, IFormFile? file)
+    {
+        if (string.IsNullOrEmpty(conversationId))
+        {
+            return BadRequest(new ApiErrorResponse { Message = "معرف المحادثة مطلوب." });
+        }
+
+        try
+        {
+            var userId = GetUserId();
+            var result = await _convService.SpecialistSendMessageAsync(conversationId, userId, message, file);
+            return Ok(ApiResponse<SendMessageResponseDto>.Ok(result));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized(new ApiErrorResponse { Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in specialist chat for conversation {ConvId}", conversationId);
+            return StatusCode(500, new ApiErrorResponse { Message = "فشل إرسال رسالة المتخصص." });
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private int GetUserId()
@@ -259,3 +438,4 @@ public class AiAssistantController : ControllerBase
         return int.TryParse(userIdStr, out var id) ? id : 0;
     }
 }
+

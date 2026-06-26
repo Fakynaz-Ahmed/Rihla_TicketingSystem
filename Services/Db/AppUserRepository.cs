@@ -90,4 +90,19 @@ public class AppUserRepository : IAppUserRepository
         user.Language = language;
         await _db.SaveChangesAsync();
     }
+
+    public async Task<List<AppUser>> GetByDepartmentsAsync(List<string> departments)
+    {
+        return await _db.Users
+            .Where(u => u.Department != null && departments.Contains(u.Department))
+            .ToListAsync();
+    }
+
+    public async Task<List<AppUser>> GetByPrimaryRoleAsync(string primaryRole)
+    {
+        return await _db.Users
+            .Where(u => u.PrimaryRole != null && u.PrimaryRole == primaryRole)
+            .ToListAsync();
+    }
 }
+

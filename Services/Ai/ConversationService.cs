@@ -1,13 +1,14 @@
 using Microsoft.Extensions.Logging;
 using Rihla.DTOs;
+using Rihla.Models.Db;
 using Rihla.Services.Cache;
 using Rihla.Services.Db;
 using Rihla.Services.Storage;
-using Rihla.Models.Db;
 using Rihla.WebSockets;
 using System.Text.Json;
 using System.IO;
 using Microsoft.AspNetCore.Http;
+using Rihla.Services.Tickets;
 
 namespace Rihla.Services.Ai;
 
@@ -30,6 +31,7 @@ public class ConversationService : IConversationService
     private readonly IWebSocketHub _hub;
     private readonly IStorageService _storage;
     private readonly IPassportDataRepository _passportRepo;
+    private readonly ITicketService _ticketService;
     private readonly ILogger<ConversationService> _logger;
 
     private static readonly TimeSpan ConvTtl = TimeSpan.FromHours(48);
@@ -44,6 +46,7 @@ public class ConversationService : IConversationService
         IWebSocketHub hub,
         IStorageService storage,
         IPassportDataRepository passportRepo,
+        ITicketService ticketService,
         ILogger<ConversationService> logger)
     {
         _ai       = ai;
@@ -54,6 +57,7 @@ public class ConversationService : IConversationService
         _hub      = hub;
         _storage  = storage;
         _passportRepo = passportRepo;
+        _ticketService = ticketService;
         _logger   = logger;
     }
 
@@ -95,7 +99,7 @@ public class ConversationService : IConversationService
             ? JsonSerializer.Deserialize<CachedConv>(cachedJson)
             : null;
 
-        string userRole, language;
+        string userRole, language, status;
         if (cached is not null)
         {
             if (cached.UserId != userId)
@@ -105,6 +109,7 @@ public class ConversationService : IConversationService
 
             userRole = cached.UserRole;
             language = cached.Language;
+            status   = cached.Status;
         }
         else
         {
@@ -120,6 +125,7 @@ public class ConversationService : IConversationService
             var user = await _userRepo.GetByIdAsync(userId);
             userRole = user?.PrimaryRole ?? "Employee";
             language = user?.Language ?? "ar";
+            status   = dbConv.Status;
         }
 
         string? attachmentUrl = null;
@@ -134,6 +140,29 @@ public class ConversationService : IConversationService
             using var ms = new MemoryStream();
             await file.CopyToAsync(ms);
             fileBytes = ms.ToArray();
+        }
+
+        // Live support routing bypasses AI passport extraction and chat
+        if (status != "active" && status != "ai")
+        {
+            var userMsgText = message ?? "";
+            await Safe(() => _msgRepo.AddAsync(conversationId, "user", userMsgText, attachmentUrl, attachmentType));
+            await HubSafe(() => PushMessageAsync(conversationId, "user", userMsgText, attachmentUrl, attachmentType));
+
+            string systemReply = "";
+            if (status == nameof(ConversationStatus.pending_cc))
+            {
+                systemReply = "[نظام] جميع موظفي الدعم مشغولون حالياً. يرجى الانتظار لحين تفرغ أحدهم.";
+            }
+
+            return new SendMessageResponseDto
+            {
+                ConversationId = conversationId,
+                Reply          = systemReply,
+                Timestamp      = DateTime.UtcNow,
+                AttachmentUrl  = attachmentUrl,
+                AttachmentType = attachmentType
+            };
         }
 
         // Check if file is uploaded
@@ -466,22 +495,32 @@ public class ConversationService : IConversationService
         var dbConv = await _convRepo.GetByIdAsync(conversationId)
             ?? throw new KeyNotFoundException("المحادثة غير موجودة.");
 
-        if (dbConv.UserId != userId)
+        if (dbConv.UserId != userId
+            && dbConv.SupportId != userId
+            && dbConv.SpecialistId != userId)
             throw new UnauthorizedAccessException("هذه المحادثة ليست لك.");
 
         var messages = await _msgRepo.GetByConversationAsync(conversationId, limit: 200);
+
+        // Fetch linked ticket & visit IDs for frontend context
+        var lastTicket = await _ticketService.GetLastTicketByConversationIdAsync(conversationId);
+        var ticketId   = lastTicket?.Id;
+        var visitId    = lastTicket?.VisitId
+                         ?? await _ticketService.GetLastVisitIdByConversationIdAsync(conversationId);
 
         return new GetMessagesResponseDto
         {
             ConversationId = conversationId,
             Status         = dbConv.Status,
+            TicketId       = ticketId,
+            VisitId        = visitId,
             Messages       = messages.Select(m => new MessageDto
             {
-                Id          = m.Id.ToString(),
-                Role        = m.Role,
-                Content     = m.Content,
-                Timestamp   = m.Timestamp,
-                AttachmentUrl = m.AttachmentUrl,
+                Id             = m.Id.ToString(),
+                Role           = m.Role,
+                Content        = m.Content,
+                Timestamp      = m.Timestamp,
+                AttachmentUrl  = m.AttachmentUrl,
                 AttachmentType = m.AttachmentType
             }).ToList()
         };
@@ -492,8 +531,35 @@ public class ConversationService : IConversationService
     public async Task<PagedResult<ConversationSummaryDto>> GetConversationsAsync(
         int userId, int page, int pageSize)
     {
-        var convs  = await _convRepo.GetByUserIdAsync(userId, page, pageSize);
-        var total  = await _convRepo.CountByUserIdAsync(userId);
+        var user = await _userRepo.GetByIdAsync(userId);
+        var role = user?.PrimaryRole ?? "Customer";
+
+        List<DbConversation> convs;
+        int total;
+
+        // Primary check: role-based routing
+        // Fallback: even if PrimaryRole is not synced correctly from ERPNext,
+        // check if the user has been assigned as support/specialist in any conversation.
+        bool isAssignedAsSupport     = await _convRepo.IsAssignedAsSupportAsync(userId);
+        bool isAssignedAsSpecialist  = await _convRepo.IsAssignedAsSpecialistAsync(userId);
+
+        if (role == Rihla.Config.AppRoles.CustomerCare || role == Rihla.Config.AppRoles.Admin
+            || (role == Rihla.Config.AppRoles.Employee && isAssignedAsSupport && !isAssignedAsSpecialist))
+        {
+            convs = await _convRepo.GetSupportConversationsAsync(userId, page, pageSize);
+            total = await _convRepo.CountSupportConversationsAsync(userId);
+        }
+        else if (role == Rihla.Config.AppRoles.Specialist
+            || (role == Rihla.Config.AppRoles.Employee && isAssignedAsSpecialist))
+        {
+            convs = await _convRepo.GetSpecialistConversationsAsync(userId, page, pageSize);
+            total = await _convRepo.CountSpecialistConversationsAsync(userId);
+        }
+        else
+        {
+            convs = await _convRepo.GetByUserIdAsync(userId, page, pageSize);
+            total = await _convRepo.CountByUserIdAsync(userId);
+        }
 
         // Get last message for each conversation
         var ids      = convs.Select(c => c.ConversationId).ToList();
@@ -513,7 +579,11 @@ public class ConversationService : IConversationService
                 LastMessage    = last?.Content,
                 LastMessageAt  = last?.Timestamp,
                 CreatedAt      = c.CreatedAt,
-                EndedAt        = c.EndedAt
+                EndedAt        = c.EndedAt,
+                SupportName    = c.SupportName,
+                SpecialistName = c.SpecialistName,
+                EscalationReason = c.EscalationReason,
+                EscalatedAt    = c.EscalatedAt
             };
         }).ToList();
 
@@ -589,6 +659,335 @@ public class ConversationService : IConversationService
             ImageUrl       = p.ImageUrl,
             Status         = p.Status.ToString().ToLower()
         }).ToList();
+    }
+
+    public async Task EscalateAsync(string conversationId, int userId, string reason)
+    {
+        var cachedJson = await _cache.GetAsync($"{ConvPrefix}{conversationId}");
+        var cached = !string.IsNullOrEmpty(cachedJson)
+            ? JsonSerializer.Deserialize<CachedConv>(cachedJson)
+            : null;
+
+        string userName, userRole, language;
+        if (cached is not null)
+        {
+            if (cached.UserId != userId)
+                throw new UnauthorizedAccessException("هذه المحادثة ليست لك.");
+            if (cached.Status != "active" && cached.Status != "ai")
+                throw new InvalidOperationException("لا يمكن تصعيد هذه المحادثة.");
+
+            userRole = cached.UserRole;
+            language = cached.Language;
+            var u = await _userRepo.GetByIdAsync(userId);
+            userName = u?.Name ?? "عميل";
+        }
+        else
+        {
+            var dbConv = await _convRepo.GetByIdAsync(conversationId)
+                ?? throw new KeyNotFoundException("المحادثة غير موجودة.");
+
+            if (dbConv.UserId != userId)
+                throw new UnauthorizedAccessException("هذه المحادثة ليست لك.");
+            if (dbConv.Status != "active" && dbConv.Status != "ai")
+                throw new InvalidOperationException("لا يمكن تصعيد هذه المحادثة.");
+
+            userName = dbConv.UserName;
+            var u = await _userRepo.GetByIdAsync(userId);
+            userRole = u?.PrimaryRole ?? "Customer";
+            language = u?.Language ?? "ar";
+        }
+
+        var newStatus = nameof(ConversationStatus.pending_cc);
+        await _convRepo.UpdateStatusExtendedAsync(conversationId, newStatus,
+            escalationReason: reason, escalatedAt: DateTime.UtcNow);
+
+        var updatedCached = new CachedConv
+        {
+            UserId = userId,
+            UserRole = userRole,
+            Language = language,
+            Status = newStatus
+        };
+        await _cache.SetAsync($"{ConvPrefix}{conversationId}", JsonSerializer.Serialize(updatedCached), ConvTtl);
+
+        var systemMsgText = $"[نظام] تم طلب تحويل المحادثة للدعم البشري. السبب: {reason}";
+        await Safe(() => _msgRepo.AddAsync(conversationId, "system", systemMsgText));
+        await HubSafe(() => PushMessageAsync(conversationId, "system", systemMsgText));
+
+        await HubSafe(() => _hub.SendToGroupAsync(WsGroups.Conv(conversationId), WsEvents.StatusChanged,
+            new StatusPayload(conversationId, newStatus)));
+
+        _logger.LogInformation("Conversation {Id} escalated to Support. Reason: {Reason}", conversationId, reason);
+
+        await AutoAssignSupportAsync(conversationId, userName, reason);
+    }
+
+    public async Task ReopenAsync(string conversationId, int userId)
+    {
+        var dbConv = await _convRepo.GetByIdAsync(conversationId)
+            ?? throw new KeyNotFoundException("المحادثة غير موجودة.");
+
+        if (dbConv.UserId != userId)
+            throw new UnauthorizedAccessException("هذه المحادثة ليست لك.");
+        if (dbConv.Status != "ended")
+            throw new InvalidOperationException("المحادثة ليست مغلقة ليتم إعادة فتحها.");
+
+        await _convRepo.ReopenConversationAsync(conversationId);
+
+        var cached = new CachedConv
+        {
+            UserId = userId,
+            UserRole = Rihla.Config.AppRoles.Customer,
+            Language = dbConv.User?.Language ?? "ar",
+            Status = "ai"
+        };
+        await _cache.SetAsync($"{ConvPrefix}{conversationId}", JsonSerializer.Serialize(cached), ConvTtl);
+
+        var systemMsgText = "[نظام] تم إعادة فتح المحادثة وتوصيلها بالمساعد الذكي.";
+        await Safe(() => _msgRepo.AddAsync(conversationId, "system", systemMsgText));
+        await HubSafe(() => PushMessageAsync(conversationId, "system", systemMsgText));
+
+        await HubSafe(() => _hub.SendToGroupAsync(WsGroups.Conv(conversationId), WsEvents.ConversationReopened,
+            new ConversationReopenedPayload(conversationId)));
+        await HubSafe(() => _hub.SendToGroupAsync(WsGroups.Conv(conversationId), WsEvents.StatusChanged,
+            new StatusPayload(conversationId, "active")));
+
+        _logger.LogInformation("Conversation {Id} reopened by user {UserId}.", conversationId, userId);
+    }
+
+    public async Task<SendMessageResponseDto> SupportSendMessageAsync(
+        string conversationId, int supportUserId, string? message, IFormFile? file = null)
+    {
+        var dbConv = await _convRepo.GetByIdAsync(conversationId)
+            ?? throw new KeyNotFoundException("المحادثة غير موجودة.");
+
+        if (dbConv.SupportId != supportUserId)
+            throw new UnauthorizedAccessException("أنت غير معين لهذه المحادثة.");
+
+        if (dbConv.Status != nameof(ConversationStatus.with_cc) && dbConv.Status != nameof(ConversationStatus.pending_specialist) && dbConv.Status != nameof(ConversationStatus.with_specialist))
+            throw new InvalidOperationException("لا يمكنك إرسال رسائل في هذه الحالة للمحادثة.");
+
+        string? attachmentUrl = null;
+        string? attachmentType = null;
+        if (file != null)
+        {
+            attachmentType = file.ContentType;
+            attachmentUrl = await _storage.SaveAttachmentFromFileAsync(file, conversationId);
+        }
+
+        var content = message ?? "";
+        await Safe(() => _msgRepo.AddAsync(conversationId, "support", content, attachmentUrl, attachmentType));
+        await HubSafe(() => PushMessageAsync(conversationId, "support", content, attachmentUrl, attachmentType));
+
+        return new SendMessageResponseDto
+        {
+            ConversationId = conversationId,
+            Reply          = content,
+            Timestamp      = DateTime.UtcNow,
+            AttachmentUrl  = attachmentUrl,
+            AttachmentType = attachmentType
+        };
+    }
+
+    public async Task EndBySupportAsync(string conversationId)
+    {
+        var dbConv = await _convRepo.GetByIdAsync(conversationId)
+            ?? throw new KeyNotFoundException("المحادثة غير موجودة.");
+
+        if (dbConv.Status == "ended")
+            return;
+
+        await _convRepo.UpdateStatusAsync(conversationId, nameof(ConversationStatus.ended), DateTime.UtcNow);
+
+        var cachedJson = await _cache.GetAsync($"{ConvPrefix}{conversationId}");
+        if (!string.IsNullOrEmpty(cachedJson))
+        {
+            var cached = JsonSerializer.Deserialize<CachedConv>(cachedJson);
+            if (cached is not null)
+            {
+                cached.Status = nameof(ConversationStatus.ended);
+                await _cache.SetAsync($"{ConvPrefix}{conversationId}", JsonSerializer.Serialize(cached), ConvTtl);
+            }
+        }
+
+        var systemMsgText = "[نظام] تم إنهاء المحادثة من قبل الدعم.";
+        await Safe(() => _msgRepo.AddAsync(conversationId, "system", systemMsgText));
+        await HubSafe(() => PushMessageAsync(conversationId, "system", systemMsgText));
+
+        await Safe(() => _ticketService.CloseTicketByConversationAsync(conversationId));
+
+        await HubSafe(() => _hub.SendToGroupAsync(WsGroups.Conv(conversationId), WsEvents.ConversationEnded,
+            new ConversationEndedPayload(conversationId)));
+        await HubSafe(() => _hub.SendToGroupAsync(WsGroups.Conv(conversationId), WsEvents.StatusChanged,
+            new StatusPayload(conversationId, nameof(ConversationStatus.ended))));
+
+        _logger.LogInformation("Conversation {Id} ended by support.", conversationId);
+    }
+
+    public async Task RequestSpecialistAsync(string conversationId, int supportUserId, string description)
+    {
+        var dbConv = await _convRepo.GetByIdAsync(conversationId)
+            ?? throw new KeyNotFoundException("المحادثة غير موجودة.");
+
+        if (dbConv.SupportId != supportUserId)
+            throw new UnauthorizedAccessException("أنت غير معين لهذه المحادثة لتطلب متخصصاً.");
+
+        if (dbConv.Status != nameof(ConversationStatus.with_cc))
+            throw new InvalidOperationException("يمكن طلب المتخصص فقط عندما تكون المحادثة مع الدعم الفني.");
+
+        var specialist = await _ticketService.GetLeastBusySpecialistAsync()
+            ?? throw new InvalidOperationException("لا يوجد متخصصون متاحون حالياً. يرجى المحاولة لاحقاً.");
+
+        var specName = specialist.Name;
+        var specId = specialist.Id;
+
+        // 1. Create the ERPNext Task and Visit record first.
+        // This is not wrapped in Safe() so any ERPNext/DB error here bubbles up and halts the request.
+        var requestVisitDto = new RequestVisitDto
+        {
+            Description = description,
+            Priority = "medium"
+        };
+        await _ticketService.CreateErpNextTaskForTicketAsync(conversationId, specId, requestVisitDto);
+
+        // 2. Since ERPNext visit succeeded, proceed to update the conversation status, ticket specialist assignment and notify
+        await _convRepo.UpdateStatusExtendedAsync(conversationId, nameof(ConversationStatus.with_specialist),
+            specialistId: specId, specialistName: specName);
+
+        var cachedJson = await _cache.GetAsync($"{ConvPrefix}{conversationId}");
+        if (!string.IsNullOrEmpty(cachedJson))
+        {
+            var cached = JsonSerializer.Deserialize<CachedConv>(cachedJson);
+            if (cached is not null)
+            {
+                cached.Status = nameof(ConversationStatus.with_specialist);
+                await _cache.SetAsync($"{ConvPrefix}{conversationId}", JsonSerializer.Serialize(cached), ConvTtl);
+            }
+        }
+
+        var specJoinedMsg = $"[نظام] انضم المتخصص {specName} للمحادثة لمتابعة طلبك.";
+        await Safe(() => _msgRepo.AddAsync(conversationId, "system", specJoinedMsg));
+        await HubSafe(() => PushMessageAsync(conversationId, "system", specJoinedMsg));
+
+        await Safe(() => _ticketService.UpdateTicketSpecialistAsync(conversationId, specId, specName));
+
+        _hub.AddUserToGroup(specId.ToString(), WsGroups.Conv(conversationId));
+
+        await HubSafe(() => _hub.SendToGroupAsync(WsGroups.Conv(conversationId), WsEvents.AgentJoined,
+            new AgentJoinedPayload(conversationId, specName, "specialist")));
+
+        await HubSafe(() => _hub.SendToGroupAsync(WsGroups.Conv(conversationId), WsEvents.StatusChanged,
+            new StatusPayload(conversationId, nameof(ConversationStatus.with_specialist))));
+
+        _logger.LogInformation("Specialist {Name} (ID {Id}) assigned to conversation {ConvId}.", specName, specId, conversationId);
+    }
+
+    public async Task<SendMessageResponseDto> SpecialistSendMessageAsync(
+        string conversationId, int specialistUserId, string? message, IFormFile? file = null)
+    {
+        var dbConv = await _convRepo.GetByIdAsync(conversationId)
+            ?? throw new KeyNotFoundException("المحادثة غير موجودة.");
+
+        if (dbConv.SpecialistId != specialistUserId)
+            throw new UnauthorizedAccessException("أنت غير معين لهذه المحادثة كمتخصص.");
+
+        if (dbConv.Status != nameof(ConversationStatus.with_specialist))
+            throw new InvalidOperationException("لا يمكنك إرسال رسائل في هذه الحالة للمحادثة.");
+
+        string? attachmentUrl = null;
+        string? attachmentType = null;
+        if (file != null)
+        {
+            attachmentType = file.ContentType;
+            attachmentUrl = await _storage.SaveAttachmentFromFileAsync(file, conversationId);
+        }
+
+        var content = message ?? "";
+        await Safe(() => _msgRepo.AddAsync(conversationId, "specialist", content, attachmentUrl, attachmentType));
+        await HubSafe(() => PushMessageAsync(conversationId, "specialist", content, attachmentUrl, attachmentType));
+
+        return new SendMessageResponseDto
+        {
+            ConversationId = conversationId,
+            Reply          = content,
+            Timestamp      = DateTime.UtcNow,
+            AttachmentUrl  = attachmentUrl,
+            AttachmentType = attachmentType
+        };
+    }
+
+    private async Task AutoAssignSupportAsync(string conversationId, string userName, string reason)
+    {
+        try
+        {
+            var ccAgents = await _userRepo.GetByPrimaryRoleAsync(Rihla.Config.AppRoles.CustomerCare);
+            if (ccAgents.Count == 0)
+            {
+                _logger.LogWarning("No Customer Care agents found. Conversation {ConvId} stays pending.", conversationId);
+                var busyMsg = "[نظام] جميع موظفي الدعم مشغولون حالياً. يرجى الانتظار لحين تفرغ أحدهم.";
+                await Safe(() => _msgRepo.AddAsync(conversationId, "system", busyMsg));
+                await HubSafe(() => PushMessageAsync(conversationId, "system", busyMsg));
+                return;
+            }
+
+            var agentIds = ccAgents.Select(a => a.Id).ToList();
+            var activeCounts = await _convRepo.GetActiveCountBySupportIdsAsync(agentIds);
+            var bestAgent = ccAgents.MinBy(a => activeCounts.GetValueOrDefault(a.Id, 0));
+
+            if (bestAgent is null) return;
+
+            var agentName = bestAgent.Name;
+            var agentId = bestAgent.Id;
+
+            await _convRepo.UpdateStatusExtendedAsync(conversationId, nameof(ConversationStatus.with_cc),
+                supportId: agentId, supportName: agentName);
+
+            var cachedJson = await _cache.GetAsync($"{ConvPrefix}{conversationId}");
+            if (!string.IsNullOrEmpty(cachedJson))
+            {
+                var cached = JsonSerializer.Deserialize<CachedConv>(cachedJson);
+                if (cached is not null)
+                {
+                    cached.Status = nameof(ConversationStatus.with_cc);
+                    await _cache.SetAsync($"{ConvPrefix}{conversationId}", JsonSerializer.Serialize(cached), ConvTtl);
+                }
+            }
+
+            // ── Create ticket in ERPNext and link to conversation ─────────────
+            // Get customer ERPNext ID to include in the ticket
+            var conv = await _convRepo.GetByIdAsync(conversationId);
+            if (conv is not null)
+            {
+                var customer = await _userRepo.GetByIdAsync(conv.UserId);
+                var customerErpId = customer?.ErpNextUserId ?? conv.UserName;
+
+                await Safe(() => _ticketService.CreateEscalationTicketAsync(
+                    conversationId   : conversationId,
+                    customerErpNextUserId : customerErpId,
+                    customerName     : conv.UserName,
+                    supportAppUserId : agentId,
+                    supportName      : agentName,
+                    escalationReason : reason));
+            }
+
+            var joinedMsg = $"[نظام] انضم موظف الدعم {agentName} للمحادثة لتلقي طلبك.";
+            await Safe(() => _msgRepo.AddAsync(conversationId, "system", joinedMsg));
+            await HubSafe(() => PushMessageAsync(conversationId, "system", joinedMsg));
+
+            _hub.AddUserToGroup(agentId.ToString(), WsGroups.Conv(conversationId));
+
+            await HubSafe(() => _hub.SendToGroupAsync(WsGroups.Conv(conversationId), WsEvents.AgentJoined,
+                new AgentJoinedPayload(conversationId, agentName, "customer_care")));
+
+            await HubSafe(() => _hub.SendToGroupAsync(WsGroups.Conv(conversationId), WsEvents.StatusChanged,
+                new StatusPayload(conversationId, nameof(ConversationStatus.with_cc))));
+
+            _logger.LogInformation("Support Agent {Name} (ID {Id}) assigned to conversation {ConvId}.", agentName, agentId, conversationId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "AutoAssignSupportAsync failed for conversation {ConvId}", conversationId);
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

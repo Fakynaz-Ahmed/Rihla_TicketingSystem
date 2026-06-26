@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Rihla.Data;
 
@@ -11,9 +12,11 @@ using Rihla.Data;
 namespace Rihla.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260624085200_AddTicketsVisitsAndStateMachine")]
+    partial class AddTicketsVisitsAndStateMachine
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -390,6 +393,10 @@ namespace Rihla.Migrations
                         .HasMaxLength(254)
                         .HasColumnType("nvarchar(254)");
 
+                    b.Property<string>("ErpNextTaskName")
+                        .HasMaxLength(254)
+                        .HasColumnType("nvarchar(254)");
+
                     b.Property<string>("Priority")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -407,6 +414,11 @@ namespace Rihla.Migrations
 
                     b.Property<int?>("SpecialistAppUserId")
                         .HasColumnType("int");
+
+                    b.Property<string>("StageName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -428,6 +440,9 @@ namespace Rihla.Migrations
                     b.Property<string>("TicketRatingFeedback")
                         .HasMaxLength(1000)
                         .HasColumnType("nvarchar(1000)");
+
+                    b.Property<int>("TicketSeq")
+                        .HasColumnType("int");
 
                     b.Property<string>("Title")
                         .IsRequired()

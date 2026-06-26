@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Rihla.Config;
 using Rihla.Data;
 using Rihla.DTOs;
 using Rihla.Services.Auth;
@@ -178,16 +179,17 @@ public class ErpNextSyncService : IErpNextSyncService
 
                 try
                 {
-                    // Resolve roles
+                    // Resolve roles & department, then determine primary role
                     rolesGrouped.TryGetValue(name, out var roles);
                     roles ??= [];
 
-                    var primaryRole = AuthService.DeterminePrimaryRole(roles);
-                    var allowedModules = AuthService.DetermineModules(roles);
-                    var modulesJson = JsonSerializer.Serialize(allowedModules);
-
-                    // Resolve department
                     departmentMap.TryGetValue(name, out var department);
+
+                    // Pass both roles AND department so CustomerCare vs Specialist
+                    // can be correctly distinguished (see Config/UserRoles.cs)
+                    var primaryRole    = AuthService.DeterminePrimaryRole(roles, department);
+                    var allowedModules = AuthService.DetermineModules(roles);
+                    var modulesJson    = JsonSerializer.Serialize(allowedModules);
 
                     bool isNew = !existingUsers.ContainsKey(name);
 

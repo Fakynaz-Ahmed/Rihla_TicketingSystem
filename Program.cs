@@ -18,6 +18,9 @@ using Rihla.Services.ErpNext.Tools;
 using Rihla.Filters;
 using Rihla.Services.Storage;
 using Rihla.WebSockets;
+using Rihla.Services.Products;
+using Rihla.Services.Tickets;
+using Rihla.Services.Visits;
 using System.Globalization;
 
 // Load .env file into environment variables
@@ -167,6 +170,11 @@ builder.Services.AddScoped<IDeviceTokenRepository, DeviceTokenRepository>();
 builder.Services.AddScoped<ITokenRepository, TokenRepository>();
 builder.Services.AddScoped<IConversationRepository, ConversationRepository>();
 builder.Services.AddScoped<IPassportDataRepository, PassportDataRepository>();
+builder.Services.AddScoped<IProductRepository, ProductRepository>();
+builder.Services.AddScoped<IUserProductRepository, UserProductRepository>();
+builder.Services.AddScoped<ITicketRepository, TicketRepository>();
+builder.Services.AddScoped<IVisitRepository, VisitRepository>();
+builder.Services.AddScoped<IVisitActivityRepository, VisitActivityRepository>();
 
 // -------------------------------------------------------------------------
 // MongoDB — messages collection
@@ -192,7 +200,15 @@ builder.Services.AddSingleton<ICacheService, CacheService>();
 // -------------------------------------------------------------------------
 // Http Clients & Services
 // -------------------------------------------------------------------------
-builder.Services.AddHttpClient<IErpNextClient, ErpNextClient>();
+// ErpNextClient must NOT store session cookies.
+// POST /api/method/login sets a session cookie; if stored on the shared HttpClient,
+// ERPNext uses that session (not the Admin API Key) for permission checks on subsequent
+// requests — causing 403 on Has Role / empty roles for non-admin users.
+builder.Services.AddHttpClient<IErpNextClient, ErpNextClient>()
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+    {
+        UseCookies = false   // Admin API Key only — no session cookie storage
+    });
 builder.Services.AddHttpClient<IAiService, AiService>();
 
 builder.Services.AddHttpContextAccessor();
@@ -203,6 +219,9 @@ builder.Services.AddScoped<IErpNextToolExecutor, ErpNextToolExecutor>();
 builder.Services.AddScoped<IConversationService, ConversationService>();
 builder.Services.AddScoped<IErpNextSyncService, ErpNextSyncService>();
 builder.Services.AddScoped<IStorageService, LocalStorageService>();
+builder.Services.AddScoped<IProductService, ProductService>();
+builder.Services.AddScoped<ITicketService, TicketService>();
+builder.Services.AddScoped<IVisitService, VisitService>();
 builder.Services.AddHostedService<ErpNextSyncBackgroundService>();
 
 // -------------------------------------------------------------------------
