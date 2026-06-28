@@ -52,13 +52,18 @@ public class TicketRepository : ITicketRepository
         await _db.SaveChangesAsync();
     }
 
-    public async Task<List<DbTicket>> GetByCustomerAsync(string customerErpNextUserId)
-    {
-        return await _db.Tickets
+    public async Task<List<DbTicket>> GetByCustomerAsync(string customerErpNextUserId) =>
+             await _db.Tickets
             .Where(t => t.CustomerErpNextUserId == customerErpNextUserId)
             .OrderByDescending(t => t.CreateDate)
             .ToListAsync();
-    }
+    
+    public async Task<DbTicket?> GetByErpNextIdAsync(string erpNextId) =>
+            await _db.Tickets
+            .Include(t => t.Specialist)
+            .Include(t => t.Support)
+            .FirstOrDefaultAsync(t => t.ErpNextId == erpNextId);
+    
 
     // ── Filtered paginated queries ────────────────────────────────────────────
 

@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.IO;
 using Microsoft.AspNetCore.Http;
 using Rihla.Services.Tickets;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Rihla.Services.Ai;
 
@@ -32,6 +33,7 @@ public class ConversationService : IConversationService
     private readonly IStorageService _storage;
     private readonly IPassportDataRepository _passportRepo;
     private readonly ITicketService _ticketService;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ConversationService> _logger;
 
     private static readonly TimeSpan ConvTtl = TimeSpan.FromHours(48);
@@ -47,6 +49,7 @@ public class ConversationService : IConversationService
         IStorageService storage,
         IPassportDataRepository passportRepo,
         ITicketService ticketService,
+        IServiceScopeFactory scopeFactory,
         ILogger<ConversationService> logger)
     {
         _ai       = ai;
@@ -58,6 +61,7 @@ public class ConversationService : IConversationService
         _storage  = storage;
         _passportRepo = passportRepo;
         _ticketService = ticketService;
+        _scopeFactory = scopeFactory;
         _logger   = logger;
     }
 
@@ -148,6 +152,12 @@ public class ConversationService : IConversationService
             var userMsgText = message ?? "";
             await Safe(() => _msgRepo.AddAsync(conversationId, "user", userMsgText, attachmentUrl, attachmentType));
             await HubSafe(() => PushMessageAsync(conversationId, "user", userMsgText, attachmentUrl, attachmentType));
+
+            // Sync user message to ERPNext in background
+            var syncText = string.IsNullOrEmpty(userMsgText) && !string.IsNullOrEmpty(attachmentUrl)
+                ? "[أرسل مرفقاً]"
+                : userMsgText;
+            SyncMessageBackground(conversationId, "Customer", syncText);
 
             string systemReply = "";
             if (status == nameof(ConversationStatus.pending_cc))
@@ -779,6 +789,12 @@ public class ConversationService : IConversationService
         await Safe(() => _msgRepo.AddAsync(conversationId, "support", content, attachmentUrl, attachmentType));
         await HubSafe(() => PushMessageAsync(conversationId, "support", content, attachmentUrl, attachmentType));
 
+        // Sync support message to ERPNext in background
+        var syncText = string.IsNullOrEmpty(content) && !string.IsNullOrEmpty(attachmentUrl)
+            ? "[أرسل مرفقاً]"
+            : content;
+        SyncMessageBackground(conversationId, "Support", syncText);
+
         return new SendMessageResponseDto
         {
             ConversationId = conversationId,
@@ -906,6 +922,12 @@ public class ConversationService : IConversationService
         await Safe(() => _msgRepo.AddAsync(conversationId, "specialist", content, attachmentUrl, attachmentType));
         await HubSafe(() => PushMessageAsync(conversationId, "specialist", content, attachmentUrl, attachmentType));
 
+        // Sync specialist message to ERPNext in background
+        var syncText = string.IsNullOrEmpty(content) && !string.IsNullOrEmpty(attachmentUrl)
+            ? "[أرسل مرفقاً]"
+            : content;
+        SyncMessageBackground(conversationId, "Specialist", syncText);
+
         return new SendMessageResponseDto
         {
             ConversationId = conversationId,
@@ -939,6 +961,28 @@ public class ConversationService : IConversationService
             var agentName = bestAgent.Name;
             var agentId = bestAgent.Id;
 
+            // ── Create ticket in ERPNext and link to conversation ─────────────
+            // We must create the ticket FIRST before updating the conversation status
+            var conv = await _convRepo.GetByIdAsync(conversationId);
+            if (conv is not null)
+            {
+                var customer = await _userRepo.GetByIdAsync(conv.UserId);
+                var customerErpId = customer?.ErpNextUserId ?? conv.UserName;
+
+                // Do not use Safe() here. If local ticket creation fails, we should abort the assignment.
+                await _ticketService.CreateEscalationTicketAsync(
+                    conversationId   : conversationId,
+                    customerErpNextUserId : customerErpId,
+                    customerName     : conv.UserName,
+                    supportAppUserId : agentId,
+                    supportName      : agentName,
+                    escalationReason : reason);
+            }
+            else
+            {
+                throw new KeyNotFoundException("المحادثة غير موجودة.");
+            }
+
             await _convRepo.UpdateStatusExtendedAsync(conversationId, nameof(ConversationStatus.with_cc),
                 supportId: agentId, supportName: agentName);
 
@@ -951,23 +995,6 @@ public class ConversationService : IConversationService
                     cached.Status = nameof(ConversationStatus.with_cc);
                     await _cache.SetAsync($"{ConvPrefix}{conversationId}", JsonSerializer.Serialize(cached), ConvTtl);
                 }
-            }
-
-            // ── Create ticket in ERPNext and link to conversation ─────────────
-            // Get customer ERPNext ID to include in the ticket
-            var conv = await _convRepo.GetByIdAsync(conversationId);
-            if (conv is not null)
-            {
-                var customer = await _userRepo.GetByIdAsync(conv.UserId);
-                var customerErpId = customer?.ErpNextUserId ?? conv.UserName;
-
-                await Safe(() => _ticketService.CreateEscalationTicketAsync(
-                    conversationId   : conversationId,
-                    customerErpNextUserId : customerErpId,
-                    customerName     : conv.UserName,
-                    supportAppUserId : agentId,
-                    supportName      : agentName,
-                    escalationReason : reason));
             }
 
             var joinedMsg = $"[نظام] انضم موظف الدعم {agentName} للمحادثة لتلقي طلبك.";
@@ -987,6 +1014,8 @@ public class ConversationService : IConversationService
         catch (Exception ex)
         {
             _logger.LogError(ex, "AutoAssignSupportAsync failed for conversation {ConvId}", conversationId);
+            // If it fails, we should notify the user or revert status, but since it's an auto-assignment, 
+            // the status is left as pending_cc (which is handled by EscalateAsync before this).
         }
     }
 
@@ -1024,6 +1053,23 @@ public class ConversationService : IConversationService
     {
         try { await action(); }
         catch (Exception ex) { _logger.LogWarning(ex, "WebSocket push failed (non-critical)."); }
+    }
+
+    private void SyncMessageBackground(string conversationId, string senderRole, string content)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var ticketService = scope.ServiceProvider.GetRequiredService<ITicketService>();
+                await ticketService.SyncMessageToErpNextAsync(conversationId, senderRole, content);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Background message sync failed for conversation {ConvId}.", conversationId);
+            }
+        });
     }
 }
 

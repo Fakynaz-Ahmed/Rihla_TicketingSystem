@@ -56,4 +56,5 @@ public interface ITicketService
     Task<DbTicket?> GetLastTicketByConversationIdAsync(string conversationId);
     Task<int?> GetLastVisitIdByConversationIdAsync(string conversationId);
     Task<SupportTicketDto> RateTicketAsync(int ticketId, float rating, string? feedback, string customerErpNextUserId);
+    Task SyncMessageToErpNextAsync(string conversationId, string senderRole, string content);
 }

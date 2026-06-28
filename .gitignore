@@ -22,3 +22,4 @@ wwwroot/attachments/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+appsettings.Production.json

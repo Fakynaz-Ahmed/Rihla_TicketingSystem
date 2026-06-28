@@ -177,14 +177,18 @@ public class TicketService : ITicketService
         {
             var erpPayload = new Dictionary<string, object?>
             {
-                ["customer"] = ticket.CustomerErpNextUserId,
-                ["maintenance_type"] = dto.MaintenanceType ?? "Periodic",
+                ["subject"] = $"Visit Request for Ticket: {ticket.Title}",
                 ["description"] = dto.Description,
-                ["priority"] = dto.Priority == "high" ? "High" : "Medium",
+                ["priority"] = dto.Priority == "high" ? "High" : "Low",
                 ["status"] = "Open"
             };
 
-            var erpVisit = await _erp.CreateDocAsync("Maintenance Visit", erpPayload);
+            if (!string.IsNullOrEmpty(ticket.ErpNextId) && !ticket.ErpNextId.StartsWith("PENDING_SYNC"))
+            {
+                erpPayload["hd_ticket"] = ticket.ErpNextId;
+            }
+
+            var erpVisit = await _erp.CreateDocAsync("Task", erpPayload);
             if (erpVisit is not null && erpVisit.TryGetValue("name", out var nameVal) && nameVal is not null)
             {
                 await _visitService.UpdateVisitErpNextIdAsync(createdVisit.Id, nameVal.ToString()!);
@@ -330,6 +334,28 @@ public class TicketService : ITicketService
             if (erpTicket is not null && erpTicket.TryGetValue("name", out var nameVal) && nameVal is not null)
             {
                 erpNextId = nameVal.ToString()!;
+
+                // Assign the ticket to the support agent in ERPNext
+                var supportUser = await _userRepo.GetByIdAsync(supportAppUserId);
+                if (supportUser != null && !string.IsNullOrEmpty(supportUser.Email))
+                {
+                    try
+                    {
+                        var todoPayload = new Dictionary<string, object?>
+                        {
+                            ["reference_type"] = "HD Ticket",
+                            ["reference_name"] = erpNextId,
+                            ["allocated_to"] = supportUser.Email,
+                            ["status"] = "Open",
+                            ["description"] = $"Assigned Support Agent: {supportName}"
+                        };
+                        await _erp.CreateDocAsync("ToDo", todoPayload);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to create ToDo assignment in ERPNext for support agent {Email}", supportUser.Email);
+                    }
+                }
             }
         }
         catch (Exception ex)
@@ -407,6 +433,28 @@ public class TicketService : ITicketService
             {
                 erpNextId = nameVal.ToString()!;
                 _logger.LogInformation("Created ERPNext HD Ticket {Id} for escalated conversation {ConvId}.", erpNextId, conversationId);
+
+                // Assign the ticket to the support agent in ERPNext
+                var supportUser = await _userRepo.GetByIdAsync(supportAppUserId);
+                if (supportUser != null && !string.IsNullOrEmpty(supportUser.Email))
+                {
+                    try
+                    {
+                        var todoPayload = new Dictionary<string, object?>
+                        {
+                            ["reference_type"] = "HD Ticket",
+                            ["reference_name"] = erpNextId,
+                            ["allocated_to"] = supportUser.Email,
+                            ["status"] = "Open",
+                            ["description"] = $"Assigned Support Agent: {supportName}"
+                        };
+                        await _erp.CreateDocAsync("ToDo", todoPayload);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to create ToDo assignment in ERPNext for support agent {Email}", supportUser.Email);
+                    }
+                }
             }
         }
         catch (Exception ex)
@@ -455,10 +503,17 @@ public class TicketService : ITicketService
     public async Task<DbVisit?> CreateErpNextTaskForTicketAsync(string conversationId, int specialistAppUserId, RequestVisitDto? dto = null)
     {
         var ticket = await _ticketRepo.GetByConversationIdAsync(conversationId);
-        if (ticket is null) return null;
+        if (ticket is null)
+        {
+            throw new InvalidOperationException("لا يمكن طلب زيارة لأن هذه المحادثة غير مرتبطة بتذكرة صالحة.");
+        }
 
         var specialist = await _userRepo.GetByIdAsync(specialistAppUserId);
         var specName = specialist?.Name ?? "Specialist";
+
+        var customer = await _userRepo.GetByErpNextUserIdAsync(ticket.CustomerErpNextUserId);
+        var customerName = customer?.Name ?? ticket.CustomerErpNextUserId;
+        var subjectName = $"Technical Visit - {customerName}";
 
         // 1. Create visit in ERPNext first
         string erpNextId;
@@ -466,18 +521,49 @@ public class TicketService : ITicketService
         {
             var erpPayload = new Dictionary<string, object?>
             {
-                ["customer"] = ticket.CustomerErpNextUserId,
+                ["subject"] = subjectName,
                 ["description"] = dto?.Description ?? "Requested via support chat.",
-                ["priority"] = dto?.Priority == "high" ? "High" : "Medium",
+                ["priority"] = dto?.Priority == "high" ? "High" : "Low",
                 ["status"] = "Open"
             };
 
-            var erpVisit = await _erp.CreateDocAsync("Maintenance Visit", erpPayload);
+            if (specialist != null && !string.IsNullOrEmpty(specialist.Email))
+            {
+                erpPayload["_assign"] = System.Text.Json.JsonSerializer.Serialize(new[] { specialist.Email });
+            }
+
+            if (!string.IsNullOrEmpty(ticket.ErpNextId) && !ticket.ErpNextId.StartsWith("PENDING_SYNC"))
+            {
+                erpPayload["custom_hd_ticket"] = ticket.ErpNextId;
+            }
+
+            var erpVisit = await _erp.CreateDocAsync("Task", erpPayload);
             if (erpVisit is null || !erpVisit.TryGetValue("name", out var nameVal) || nameVal is null)
             {
                 throw new InvalidOperationException("ERPNext returned success but did not return a valid document name/ID.");
             }
             erpNextId = nameVal.ToString()!;
+
+            // Create ToDo assignment in ERPNext so it shows up in the "Assigned To" sidebar
+            if (specialist != null && !string.IsNullOrEmpty(specialist.Email))
+            {
+                try
+                {
+                    var todoPayload = new Dictionary<string, object?>
+                    {
+                        ["reference_type"] = "Task",
+                        ["reference_name"] = erpNextId,
+                        ["allocated_to"] = specialist.Email,
+                        ["status"] = "Open",
+                        ["description"] = $"Assigned specialist: {specName}"
+                    };
+                    await _erp.CreateDocAsync("ToDo", todoPayload);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to create ToDo assignment in ERPNext for specialist {Email}", specialist.Email);
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -492,7 +578,7 @@ public class TicketService : ITicketService
             CustomerErpNextUserId = ticket.CustomerErpNextUserId,
             AssignedUserId = specialistAppUserId,
             AssignedUserName = specName,
-            Name = $"Appointment for Ticket: {ticket.Title}",
+            Name = subjectName,
             Stage = "New",
             Priority = dto?.Priority == "high" ? "1" : "0",
             Description = dto?.Description ?? "Requested via support chat.",
@@ -667,4 +753,71 @@ public class TicketService : ITicketService
         // Unknown — default to Open
         _ => TicketStatus.Open
     };
+
+    public async Task SyncMessageToErpNextAsync(string conversationId, string senderRole, string content)
+    {
+        try
+        {
+            var ticket = await _ticketRepo.GetByConversationIdAsync(conversationId);
+            if (ticket == null || string.IsNullOrEmpty(ticket.ErpNextId) || ticket.ErpNextId.StartsWith("PENDING_SYNC"))
+            {
+                return; // No active ERPNext ticket to sync to
+            }
+
+            // Determine the name and email of the sender
+            string senderName = senderRole;
+            string? senderEmail = null;
+
+            if (senderRole == "Customer")
+            {
+                var customer = await _userRepo.GetByErpNextUserIdAsync(ticket.CustomerErpNextUserId);
+                senderName = customer?.Name ?? ticket.CustomerErpNextUserId;
+                senderEmail = customer?.Email;
+            }
+            else if (senderRole == "Support" && ticket.SupportAppUserId.HasValue)
+            {
+                var support = await _userRepo.GetByIdAsync(ticket.SupportAppUserId.Value);
+                senderName = support?.Name ?? "Support Agent";
+                senderEmail = support?.Email;
+            }
+            else if (senderRole == "Specialist" && ticket.SpecialistAppUserId.HasValue)
+            {
+                var specialist = await _userRepo.GetByIdAsync(ticket.SpecialistAppUserId.Value);
+                senderName = specialist?.Name ?? "Specialist";
+                senderEmail = specialist?.Email;
+            }
+
+            // Fallback email if null
+            if (string.IsNullOrEmpty(senderEmail))
+            {
+                senderEmail = "system@rihla.com";
+            }
+
+            var communicationPayload = new Dictionary<string, object?>
+            {
+                ["communication_type"] = "Communication",
+                ["communication_medium"] = "Chat",
+                ["sent_or_received"] = "Received",
+                ["reference_doctype"] = "HD Ticket",
+                ["reference_name"] = ticket.ErpNextId,
+                ["content"] = $"<strong>{senderName} ({senderRole})</strong>: {content}",
+                ["sender"] = senderEmail,
+                ["sender_full_name"] = senderName
+            };
+
+            var erpComment = await _erp.CreateDocAsync("Communication", communicationPayload);
+            if (erpComment == null)
+            {
+                _logger.LogWarning("ERPNext returned null when creating Communication for ticket {TicketId}.", ticket.ErpNextId);
+            }
+            else
+            {
+                _logger.LogInformation("Successfully synced message to ERPNext ticket {TicketId} timeline.", ticket.ErpNextId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to sync message to ERPNext timeline for conversation {ConvId}.", conversationId);
+        }
+    }
 }

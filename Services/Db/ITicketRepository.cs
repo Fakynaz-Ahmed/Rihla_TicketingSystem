@@ -15,6 +15,7 @@ public interface ITicketRepository
     Task<DbTicket> CreateAsync(DbTicket ticket);
     Task<DbTicket?> GetByIdAsync(int id);
     Task<DbTicket?> GetByConversationIdAsync(string conversationId);
+    Task<DbTicket?> GetByErpNextIdAsync(string erpNextId);
     Task<DbTicket?> GetLastByConversationIdAsync(string conversationId);
     Task<int?> GetLastVisitIdByConversationIdAsync(string conversationId);
     Task UpdateAsync(int id, string? status, string? priority);
