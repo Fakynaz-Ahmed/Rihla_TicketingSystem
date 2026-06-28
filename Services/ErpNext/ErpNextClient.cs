@@ -79,46 +79,53 @@ public class ErpNextClient : IErpNextClient
 
     public async Task<ErpNextUser?> GetUserAsync(string email)
     {
-        // Fetch user document
+        // Fetch user document for basic info (name, full_name, phone, image, etc.)
         var userDoc = await GetDocAsync("User", email);
         if (userDoc is null) return null;
 
-        // 1. Try to fetch roles from the embedded child table in the user document (Preferred & secure)
+        // Always query Has Role via the REST endpoint (api/resource/Has Role).
+        // NOTE: frappe.client.get_list does NOT support child doctypes — use GetDocListAsync only.
         var roles = new List<string>();
-        if (userDoc.TryGetValue("roles", out var rolesObj) && rolesObj is System.Collections.IEnumerable rolesList)
+        try
         {
-            foreach (var r in rolesList)
+            var rolesFilter = new Dictionary<string, string>
             {
-                if (r is Dictionary<string, object?> roleDict && 
-                    roleDict.TryGetValue("role", out var roleVal) && 
-                    roleVal is string roleName)
-                {
-                    roles.Add(roleName);
-                }
-            }
+                ["parent"]     = email,
+                ["parenttype"] = "User"
+            };
+            var roleFields = new List<string> { "role" };
+            var roleRows   = await GetDocListAsync("Has Role", rolesFilter, roleFields, limit: 100);
+
+            _logger.LogInformation("[RoleFetch] Has Role rows returned for {Email}: {Count}", email, roleRows.Count);
+            foreach (var row in roleRows)
+                _logger.LogInformation("[RoleFetch]   → {Role}", row.TryGetValue("role", out var v) ? v?.ToString() : "?");
+
+            roles = roleRows
+                .Select(r => r.TryGetValue("role", out var v) ? v?.ToString() : null)
+                .Where(r => !string.IsNullOrEmpty(r))
+                .Cast<string>()
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[RoleFetch] Failed to query Has Role for {Email}", email);
         }
 
-        // 2. Fallback: If for some reason the child table is empty, fall back to querying the "Has Role" table directly
+        // Fallback: if Has Role returned nothing, read from embedded User doc roles
         if (roles.Count == 0)
         {
-            try
+            _logger.LogWarning("[RoleFetch] Has Role query returned empty for {Email}. Reading from User doc embedded roles.", email);
+            if (userDoc.TryGetValue("roles", out var rolesObj) && rolesObj is System.Collections.IEnumerable rolesList)
             {
-                var rolesFilter = new Dictionary<string, string>
+                foreach (var r in rolesList)
                 {
-                    ["parent"] = email,
-                    ["parenttype"] = "User"
-                };
-                var roleFields  = new List<string> { "role" };
-                var roleRows    = await GetDocListAsync("Has Role", rolesFilter, roleFields, limit: 100);
-                roles = roleRows
-                    .Select(r => r.TryGetValue("role", out var v) ? v?.ToString() : null)
-                    .Where(r => !string.IsNullOrEmpty(r))
-                    .Cast<string>()
-                    .ToList();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to fetch roles from Has Role child table as fallback for {Email}", email);
+                    if (r is Dictionary<string, object?> roleDict &&
+                        roleDict.TryGetValue("role", out var roleVal) &&
+                        roleVal is string roleName)
+                        roles.Add(roleName);
+                }
+                _logger.LogInformation("[RoleFetch] User doc embedded roles for {Email}: [{Roles}]",
+                    email, string.Join(", ", roles));
             }
         }
 
@@ -326,6 +333,76 @@ public class ErpNextClient : IErpNextClient
         catch (Exception ex)
         {
             _logger.LogError(ex, "ERPNext CallMethodAsync threw for {Method}", method);
+            return null;
+        }
+    }
+
+    public async Task<Dictionary<string, object?>?> CreateDocAsync(string doctype, Dictionary<string, object?> data)
+    {
+        var url = $"api/resource/{Uri.EscapeDataString(doctype)}";
+        var json = JsonSerializer.Serialize(data, _jsonOpts);
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        AddAdminAuth(req);
+
+        try
+        {
+            var resp = await _http.SendAsync(req);
+            var body = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("ERPNext CreateDoc {Doctype} returned {Status}: {Body}", doctype, (int)resp.StatusCode, body);
+                return null;
+            }
+
+            var doc = JsonDocument.Parse(body);
+            if (!doc.RootElement.TryGetProperty("data", out var dataEl))
+                return null;
+
+            return ParseElement(dataEl);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ERPNext CreateDocAsync threw for {Doctype}", doctype);
+            return null;
+        }
+    }
+
+    public async Task<Dictionary<string, object?>?> UpdateDocAsync(string doctype, string name, Dictionary<string, object?> data)
+    {
+        var url = $"api/resource/{Uri.EscapeDataString(doctype)}/{Uri.EscapeDataString(name)}";
+        var json = JsonSerializer.Serialize(data, _jsonOpts);
+
+        using var req = new HttpRequestMessage(HttpMethod.Put, url)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        AddAdminAuth(req);
+
+        try
+        {
+            var resp = await _http.SendAsync(req);
+            var body = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("ERPNext UpdateDoc {Doctype}/{Name} returned {Status}: {Body}", doctype, name, (int)resp.StatusCode, body);
+                return null;
+            }
+
+            var doc = JsonDocument.Parse(body);
+            if (!doc.RootElement.TryGetProperty("data", out var dataEl))
+                return null;
+
+            return ParseElement(dataEl);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ERPNext UpdateDocAsync threw for {Doctype}/{Name}", doctype, name);
             return null;
         }
     }

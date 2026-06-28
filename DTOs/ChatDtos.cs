@@ -2,6 +2,7 @@ using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Rihla.Models.Db;
 
 namespace Rihla.DTOs;
 
@@ -203,6 +204,18 @@ public class ConversationSummaryDto
 
     [JsonPropertyName("ended_at")]
     public DateTime? EndedAt { get; set; }
+
+    [JsonPropertyName("support_name")]
+    public string? SupportName { get; set; }
+
+    [JsonPropertyName("specialist_name")]
+    public string? SpecialistName { get; set; }
+
+    [JsonPropertyName("escalation_reason")]
+    public string? EscalationReason { get; set; }
+
+    [JsonPropertyName("escalated_at")]
+    public DateTime? EscalatedAt { get; set; }
 }
 
 // ── Message DTOs ──────────────────────────────────────────────────────────────
@@ -235,6 +248,12 @@ public class GetMessagesResponseDto
 
     [JsonPropertyName("status")]
     public string Status { get; set; } = string.Empty;
+
+    [JsonPropertyName("ticket_id")]
+    public int? TicketId { get; set; }
+
+    [JsonPropertyName("visit_id")]
+    public int? VisitId { get; set; }
 
     [JsonPropertyName("messages")]
     public List<MessageDto> Messages { get; set; } = [];
@@ -310,4 +329,61 @@ public class PassportExtractionResult
     [JsonPropertyName("error_message")]
     public string? ErrorMessage { get; set; }
 }
+
+
+
+public class ConversationState
+{
+    public string ConversationId { get; set; } = string.Empty;
+    public int UserId { get; set; }
+    public string UserName { get; set; } = string.Empty;
+    public string UserRole { get; set; } = string.Empty;
+    public string Language { get; set; } = "ar";
+    public ConversationStatus Status { get; set; } = ConversationStatus.ai;
+    public int? SupportId { get; set; }
+    public string? SupportName { get; set; }
+    public int? SpecialistId { get; set; }
+    public string? SpecialistName { get; set; }
+    public string EscalationReason { get; set; } = string.Empty;
+    public DateTime? EscalatedAt { get; set; }
+}
+
+public class EscalateRequestDto
+{
+    [Required]
+    [JsonPropertyName("conversation_id")]
+    public string ConversationId { get; set; } = string.Empty;
+
+    [JsonPropertyName("reason")]
+    public string Reason { get; set; } = string.Empty;
+}
+
+public class ReopenConversationRequestDto
+{
+    [Required]
+    [JsonPropertyName("conversation_id")]
+    public string ConversationId { get; set; } = string.Empty;
+}
+
+public class SupportSendMessageRequestDto
+{
+    [Required]
+    [JsonPropertyName("conversation_id")]
+    public string ConversationId { get; set; } = string.Empty;
+
+    [JsonPropertyName("message")]
+    public string? Message { get; set; }
+}
+
+public class RequestSpecialistRequestDto
+{
+    [Required]
+    [JsonPropertyName("conversation_id")]
+    public string ConversationId { get; set; } = string.Empty;
+
+    [Required]
+    [JsonPropertyName("description")]
+    public string Description { get; set; } = string.Empty;
+}
+
 

@@ -51,4 +51,11 @@ public interface IErpNextClient
 
     /// <summary>Execute a whitelisted server-side method.</summary>
     Task<string?> CallMethodAsync(string method, Dictionary<string, string>? args = null);
+
+    /// <summary>Create a new document in ERPNext.</summary>
+    Task<Dictionary<string, object?>?> CreateDocAsync(string doctype, Dictionary<string, object?> data);
+
+    /// <summary>Update an existing document in ERPNext.</summary>
+    Task<Dictionary<string, object?>?> UpdateDocAsync(string doctype, string name, Dictionary<string, object?> data);
 }
+

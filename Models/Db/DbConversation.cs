@@ -26,7 +26,7 @@ public class DbConversation
     // ── Status ────────────────────────────────────────────────────────────────
     /// <summary>active | ended</summary>
     [Required, MaxLength(20)]
-    public string Status { get; set; } = "active";
+    public string Status { get; set; } = nameof(ConversationStatus.ai);
 
     /// <summary>Short title auto-generated from the first message.</summary>
     [MaxLength(300)]
@@ -34,4 +34,27 @@ public class DbConversation
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? EndedAt { get; set; }
+
+    // ── Support / Specialist Routing ──────────────────────────────────────────
+    public int? SupportId { get; set; }
+
+    [ForeignKey(nameof(SupportId))]
+    public AppUser? Support { get; set; }
+
+    [MaxLength(200)]
+    public string? SupportName { get; set; }
+
+    public int? SpecialistId { get; set; }
+
+    [ForeignKey(nameof(SpecialistId))]
+    public AppUser? Specialist { get; set; }
+
+    [MaxLength(200)]
+    public string? SpecialistName { get; set; }
+
+    [MaxLength(1000)]
+    public string? EscalationReason { get; set; }
+
+    public DateTime? EscalatedAt { get; set; }
 }
+

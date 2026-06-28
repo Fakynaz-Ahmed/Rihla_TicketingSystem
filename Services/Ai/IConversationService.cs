@@ -12,4 +12,17 @@ public interface IConversationService
     Task<PagedResult<ConversationSummaryDto>> GetConversationsAsync(int userId, int page, int pageSize);
     Task<PassportConfirmResponseDto> UpdatePassportStatusAsync(string passportNumber, Rihla.Models.Db.PassportStatus status, int userId);
     Task<List<PassportPreviewDto>> GetPassportsAsync(string? status = null);
+
+    // Customer
+    Task EscalateAsync(string conversationId, int userId, string reason);
+    Task ReopenAsync(string conversationId, int userId);
+
+    // Support Agent
+    Task<SendMessageResponseDto> SupportSendMessageAsync(string conversationId, int supportUserId, string? message, Microsoft.AspNetCore.Http.IFormFile? file = null);
+    Task EndBySupportAsync(string conversationId);
+    Task RequestSpecialistAsync(string conversationId, int supportUserId, string description);
+
+    // Specialist
+    Task<SendMessageResponseDto> SpecialistSendMessageAsync(string conversationId, int specialistUserId, string? message, Microsoft.AspNetCore.Http.IFormFile? file = null);
 }
+

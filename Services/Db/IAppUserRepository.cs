@@ -15,4 +15,9 @@ public interface IAppUserRepository
     Task UpdateLastActivityAsync(int id);
     Task UpdatePasswordHashAsync(int id, string passwordHash);
     Task UpdateLanguageAsync(int id, string language);
+    /// <summary>Returns all users whose Department matches any of the given department names.</summary>
+    Task<List<AppUser>> GetByDepartmentsAsync(List<string> departments);
+    /// <summary>Returns all users whose PrimaryRole matches the given role string (e.g. AppRoles.CustomerCare).</summary>
+    Task<List<AppUser>> GetByPrimaryRoleAsync(string primaryRole);
 }
+

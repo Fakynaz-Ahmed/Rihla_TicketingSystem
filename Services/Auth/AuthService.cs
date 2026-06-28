@@ -58,41 +58,102 @@ public class AuthService : IAuthService
         if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password))
             throw new ArgumentException("البريد الإلكتروني وكلمة المرور مطلوبان.");
 
-        // 1. Verify against ERPNext
-        var erpUser = await _erp.AuthenticateAsync(request.Email.Trim(), request.Password)
-            ?? throw new UnauthorizedAccessException("بيانات الاعتماد غير صحيحة.");
+        // ── Path A: ERPNext is reachable ─────────────────────────────────────
+        ErpNextUser? erpUser = null;
+        bool erpReachable = true;
 
-        // 2. Build allowed modules from roles
-        var allowedModules = DetermineModules(erpUser.Roles);
-        var primaryRole    = DeterminePrimaryRole(erpUser.Roles);
-        var modulesJson    = JsonSerializer.Serialize(allowedModules);
+        try
+        {
+            erpUser = await _erp.AuthenticateAsync(request.Email.Trim(), request.Password);
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogWarning(ex, "ERPNext unreachable during login for {Email}. Falling back to local DB.", request.Email);
+            erpReachable = false;
+        }
+        catch (TaskCanceledException ex)
+        {
+            _logger.LogWarning(ex, "ERPNext timed out during login for {Email}. Falling back to local DB.", request.Email);
+            erpReachable = false;
+        }
 
-        // 3. Upsert local user
-        var appUser = await _userRepo.UpsertAsync(
-            erpNextUserId  : erpUser.Username,
-            email          : erpUser.Email,
-            name           : erpUser.FullName,
-            department     : erpUser.Department,
-            primaryRole    : primaryRole,
-            allowedModules : modulesJson,
-            phone          : erpUser.Phone,
-            avatarUrl      : null);
+        if (erpReachable)
+        {
+            // ERPNext was reachable — null means wrong credentials (not a network error)
+            if (erpUser is null)
+                throw new UnauthorizedAccessException("بيانات الاعتماد غير صحيحة.");
 
-        // 4. Issue JWT
-        var (token, jti, expiresAt) = _jwt.GenerateToken(
-            appUser.Id, appUser.Email, appUser.Name, primaryRole ?? "Employee",
-            department: appUser.Department, erpNextUserId: appUser.ErpNextUserId);
+            // Build role & modules from live ERPNext data
+            var allowedModules = DetermineModules(erpUser.Roles);
+            var primaryRole    = DeterminePrimaryRole(erpUser.Roles, erpUser.Department);
+            var modulesJson    = JsonSerializer.Serialize(allowedModules);
 
-        await _tokenRepo.CreateAsync(jti, appUser.Id, DateTime.UtcNow, expiresAt);
+            // Upsert local user with fresh ERPNext data
+            var appUser = await _userRepo.UpsertAsync(
+                erpNextUserId  : erpUser.Username,
+                email          : erpUser.Email,
+                name           : erpUser.FullName,
+                department     : erpUser.Department,
+                primaryRole    : primaryRole,
+                allowedModules : modulesJson,
+                phone          : erpUser.Phone,
+                avatarUrl      : null);
 
-        // 5. Issue refresh token
-        var refreshToken = Guid.NewGuid().ToString("N");
-        var refreshTtl   = TimeSpan.FromDays(_jwtSettings.RefreshTokenDays);
-        await _cache.SetAsync($"{RefreshPrefix}{refreshToken}", jti, refreshTtl);
+            // Cache the password hash for offline fallback
+            var hash = BCrypt.Net.BCrypt.HashPassword(request.Password);
+            await _userRepo.UpdatePasswordHashAsync(appUser.Id, hash);
 
-        _logger.LogInformation("User {Email} logged in. Role={Role}", appUser.Email, primaryRole);
+            // Issue tokens
+            var (token, jti, expiresAt) = _jwt.GenerateToken(
+                appUser.Id, appUser.Email, appUser.Name, primaryRole ?? AppRoles.Employee,
+                department: appUser.Department, erpNextUserId: appUser.ErpNextUserId);
 
-        return BuildResponse(token, refreshToken, expiresAt, appUser, primaryRole, allowedModules);
+            await _tokenRepo.CreateAsync(jti, appUser.Id, DateTime.UtcNow, expiresAt);
+
+            var refreshToken = Guid.NewGuid().ToString("N");
+            var refreshTtl   = TimeSpan.FromDays(_jwtSettings.RefreshTokenDays);
+            await _cache.SetAsync($"{RefreshPrefix}{refreshToken}", jti, refreshTtl);
+
+            _logger.LogInformation("User {Email} logged in via ERPNext. Role={Role}", appUser.Email, primaryRole);
+
+            return BuildResponse(token, refreshToken, expiresAt, appUser, primaryRole, allowedModules);
+        }
+
+        // ── Path B: ERPNext offline — local DB fallback ───────────────────────
+        var localUser = await _userRepo.GetByEmailAsync(request.Email.Trim())
+            ?? throw new UnauthorizedAccessException("ERPNext غير متاح حالياً ولا يوجد حساب محلي مسجّل لهذا البريد.");
+
+        if (string.IsNullOrEmpty(localUser.PasswordHash))
+            throw new UnauthorizedAccessException("ERPNext غير متاح حالياً ولا توجد بيانات محلية محفوظة. يرجى المحاولة لاحقاً.");
+
+        if (!BCrypt.Net.BCrypt.Verify(request.Password, localUser.PasswordHash))
+            throw new UnauthorizedAccessException("بيانات الاعتماد غير صحيحة.");
+
+        // Resolve cached role & modules
+        var cachedModules = localUser.AllowedModules is not null
+            ? JsonSerializer.Deserialize<List<string>>(localUser.AllowedModules) ?? []
+            : new List<string>();
+
+        var cachedRole = localUser.PrimaryRole ?? AppRoles.Employee;
+
+        // Issue tokens from cached data (no UpsertAsync — ERPNext is offline)
+        var (offlineToken, offlineJti, offlineExpiresAt) = _jwt.GenerateToken(
+            localUser.Id, localUser.Email, localUser.Name, cachedRole,
+            department: localUser.Department, erpNextUserId: localUser.ErpNextUserId);
+
+        await _tokenRepo.CreateAsync(offlineJti, localUser.Id, DateTime.UtcNow, offlineExpiresAt);
+
+        var offlineRefresh = Guid.NewGuid().ToString("N");
+        await _cache.SetAsync(
+            $"{RefreshPrefix}{offlineRefresh}",
+            offlineJti,
+            TimeSpan.FromDays(_jwtSettings.RefreshTokenDays));
+
+        await _userRepo.UpdateLastLoginAsync(localUser.Id);
+
+        _logger.LogWarning("User {Email} logged in via LOCAL FALLBACK (ERPNext offline). Role={Role}", localUser.Email, cachedRole);
+
+        return BuildResponse(offlineToken, offlineRefresh, offlineExpiresAt, localUser, cachedRole, cachedModules);
     }
 
     // ── Refresh Token ─────────────────────────────────────────────────────────
@@ -120,7 +181,7 @@ public class AuthService : IAuthService
             : new List<string>();
 
         var (newToken, newJti, expiresAt) = _jwt.GenerateToken(
-            user.Id, user.Email, user.Name, user.PrimaryRole ?? "Employee",
+            user.Id, user.Email, user.Name, user.PrimaryRole ?? AppRoles.Employee,
             department: user.Department, erpNextUserId: user.ErpNextUserId);
 
         await _tokenRepo.CreateAsync(newJti, user.Id, DateTime.UtcNow, expiresAt);
@@ -166,32 +227,50 @@ public class AuthService : IAuthService
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    public static string? DeterminePrimaryRole(List<string> roles)
+    /// <summary>
+    /// Determines the single PrimaryRole stored in the DB and JWT claim.
+    /// Rules (evaluated in order — first match wins):
+    ///   1. Admin        → has "System Manager" or "Administrator" role
+    ///   2. Specialist   → has "Specialist" role (regardless of dept)
+    ///   3. CustomerCare → has any support role ("Support Team" / "Chat Support" / "Agent")
+    ///                     Department is NOT required — rule 2 already filters Specialists,
+    ///                     and Customers never hold support-level roles.
+    ///   4. Customer     → has "Customer" / "Portal User" / "Website User" role
+    ///   5. Employee     → fallback for all other ERPNext system-users
+    /// </summary>
+    public static string DeterminePrimaryRole(List<string> roles, string? department = null)
     {
-        // Priority order — first match wins
-        var priority = new[]
-        {
-            // ── Employee roles ──
-            "System Manager", "Administrator",
-            "Sales Manager", "Sales User", "Sales Master Manager",
-            "Purchase Manager", "Purchase User",
-            "Accounts Manager", "Accounts User",
-            "Stock Manager", "Stock User",
-            "HR Manager", "HR User",
-            "Manufacturing Manager", "Manufacturing User",
-            "Project Manager", "Projects User",
-            "Employee Self Service",
+        bool HasRole(string r) => roles.Contains(r, StringComparer.OrdinalIgnoreCase);
 
-            // ── Client roles (ERPNext Portal/Customer accounts) ──
-            "Customer", "Portal User", "Website User"
-        };
+        // 1. Admin
+        if (HasRole(ErpRoles.SystemManager) || HasRole(ErpRoles.Administrator))
+            return AppRoles.Admin;
 
-        foreach (var p in priority)
-            if (roles.Contains(p, StringComparer.OrdinalIgnoreCase))
-                return p;
+        // 2. Specialist — the custom "Specialist" role is the only distinguishing signal
+        if (HasRole(ErpRoles.Specialist))
+            return AppRoles.Specialist;
 
-        return roles.FirstOrDefault();
+        // 3. CustomerCare — any support-level role without the Specialist role above
+        //    Department is informational but NOT a hard gate; users may have no Employee
+        //    record in ERPNext (and thus a NULL dept) yet still be genuine support agents.
+        if (HasRole(ErpRoles.SupportTeam)
+         || HasRole(ErpRoles.ChatSupport)
+         || HasRole(ErpRoles.Agent)
+         || HasRole("Customer Care")
+         || HasRole("CustomerCare")
+         || HasRole("Support"))
+            return AppRoles.CustomerCare;
+
+        // 4. Customer (portal / website accounts)
+        if (HasRole(ErpRoles.Customer)
+         || HasRole(ErpRoles.PortalUser)
+         || HasRole(ErpRoles.WebsiteUser))
+            return AppRoles.Customer;
+
+        // 5. Generic employee fallback
+        return AppRoles.Employee;
     }
+
 
     public static List<string> DetermineModules(List<string> roles)
     {
@@ -240,7 +319,7 @@ public class AuthService : IAuthService
             ErpNextUserId  = user.ErpNextUserId,
             Email          = user.Email,
             Name           = user.Name,
-            PrimaryRole    = primaryRole ?? "Employee",
+            PrimaryRole    = primaryRole ?? AppRoles.Employee,
             Department     = user.Department,
             AllowedModules = modules,
             AvatarUrl      = user.AvatarUrl,

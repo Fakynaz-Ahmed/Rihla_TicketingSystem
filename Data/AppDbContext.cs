@@ -12,6 +12,11 @@ public class AppDbContext : DbContext
     public DbSet<DbConversation>  Conversations => Set<DbConversation>();
     public DbSet<DeviceToken>     DeviceTokens  => Set<DeviceToken>();
     public DbSet<DbPassportData>  PassportData  => Set<DbPassportData>();
+    public DbSet<DbProduct>       Products      => Set<DbProduct>();
+    public DbSet<DbUserProduct>   UserProducts  => Set<DbUserProduct>();
+    public DbSet<DbTicket>        Tickets       => Set<DbTicket>();
+    public DbSet<DbVisit>         Visits        => Set<DbVisit>();
+    public DbSet<DbVisitActivity> VisitActivities => Set<DbVisitActivity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -36,6 +41,16 @@ public class AppDbContext : DbContext
             e.HasOne(c => c.User)
              .WithMany(u => u.Conversations)
              .HasForeignKey(c => c.UserId)
+             .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasOne(c => c.Support)
+             .WithMany()
+             .HasForeignKey(c => c.SupportId)
+             .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasOne(c => c.Specialist)
+             .WithMany()
+             .HasForeignKey(c => c.SpecialistId)
              .OnDelete(DeleteBehavior.Restrict);
 
             e.HasIndex(c => c.UserId);
@@ -82,5 +97,62 @@ public class AppDbContext : DbContext
              .HasConversion<string>()
              .HasMaxLength(50);
         });
+
+        // ── DbProduct ────────────────────────────────────────────────────────
+        modelBuilder.Entity<DbProduct>(e =>
+        {
+            e.HasIndex(p => p.ErpNextId).IsUnique();
+            e.HasIndex(p => p.ItemCode).IsUnique();
+        });
+
+        // ── DbUserProduct ────────────────────────────────────────────────────
+        modelBuilder.Entity<DbUserProduct>(e =>
+        {
+            e.HasOne(up => up.Product)
+             .WithMany()
+             .HasForeignKey(up => up.ProductId)
+             .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasIndex(up => up.ErpNextLineName).IsUnique();
+            e.HasIndex(up => up.CustomerErpNextUserId);
+        });
+
+        // ── DbTicket ─────────────────────────────────────────────────────────
+        modelBuilder.Entity<DbTicket>(e =>
+        {
+            e.HasOne(t => t.Conversation)
+             .WithMany()
+             .HasForeignKey(t => t.ConversationId)
+             .OnDelete(DeleteBehavior.SetNull);
+
+            e.HasOne(t => t.Specialist)
+             .WithMany()
+             .HasForeignKey(t => t.SpecialistAppUserId)
+             .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasOne(t => t.Support)
+             .WithMany()
+             .HasForeignKey(t => t.SupportAppUserId)
+             .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasIndex(t => t.ErpNextId).IsUnique();
+        });
+
+        // ── DbVisit ──────────────────────────────────────────────────────────
+        modelBuilder.Entity<DbVisit>(e =>
+        {
+            e.HasOne(v => v.Ticket)
+             .WithMany()
+             .HasForeignKey(v => v.TicketId)
+             .OnDelete(DeleteBehavior.SetNull);
+
+            e.HasOne(v => v.Product)
+             .WithMany()
+             .HasForeignKey(v => v.ProductId)
+             .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasIndex(v => v.ErpNextId).IsUnique();
+        });
     }
 }
+
